@@ -24,7 +24,6 @@ import org.jetbrains.kotlin.js.translate.callTranslator.CallTranslator
 import org.jetbrains.kotlin.js.translate.context.Namer
 import org.jetbrains.kotlin.js.translate.context.TranslationContext
 import org.jetbrains.kotlin.js.translate.declaration.DelegationTranslator
-import org.jetbrains.kotlin.js.translate.general.AbstractTranslator
 import org.jetbrains.kotlin.js.translate.reference.CallArgumentTranslator
 import org.jetbrains.kotlin.js.translate.utils.BindingUtils.getClassDescriptor
 import org.jetbrains.kotlin.js.translate.utils.BindingUtils.getDescriptorForElement
@@ -43,35 +42,45 @@ import org.jetbrains.kotlin.resolve.calls.callUtil.getResolvedCallWithAssert
 import org.jetbrains.kotlin.resolve.calls.model.ResolvedCall
 import org.jetbrains.kotlin.types.JetType
 import java.util.ArrayList
+import kotlin.platform.platformStatic
 
-public class ClassInitializerTranslator(private val classDeclaration: JetClassOrObject, context: TranslationContext) : AbstractTranslator(context.newDeclarationWithScope(getClassDescriptor(context.bindingContext(), classDeclaration), JsFunctionScope(context.scope(), "scope for primary/default constructor"))) {
-    private val initializerStatements = SmartList<JsStatement>()
-
-    public fun generateInitializeMethod(delegationTranslator: DelegationTranslator): JsFunction {
+public object ClassInitializerTranslator {
+    platformStatic
+    public fun generateInitializeMethod(
+            declaration: JetClassOrObject, 
+            context: TranslationContext, 
+            delegationTranslator: DelegationTranslator
+    ): JsFunction {
         //TODO: it's inconsistent that we have scope for class and function for constructor, currently have problems implementing better way
-        val classDescriptor = getClassDescriptor(bindingContext(), classDeclaration)
+        val classDescriptor = getClassDescriptor(context.bindingContext(), declaration)
         val primaryConstructor = classDescriptor.getUnsubstitutedPrimaryConstructor()
 
-        val result: JsFunction
-        if (primaryConstructor != null) {
-            result = context().getFunctionObject(primaryConstructor)
+        val initializerStatements = SmartList<JsStatement>()
 
-            result.getBody().getStatements().addAll(setDefaultValueForArguments(primaryConstructor, context()))
+        val initFun: JsFunction
+        val newContext: TranslationContext
+        if (primaryConstructor != null) {
+            initFun = context.getFunctionObject(primaryConstructor)
+            
+            newContext = context.contextWithScope(initFun)
+
+            initFun.getBody().getStatements().addAll(setDefaultValueForArguments(primaryConstructor, newContext))
 
             //NOTE: while we translate constructor parameters we also add property initializer statements
             // for properties declared as constructor parameters
-            result.getParameters().addAll(translatePrimaryConstructorParameters())
+            initFun.getParameters().addAll(translatePrimaryConstructorParameters(initializerStatements, context, declaration))
 
-            mayBeAddCallToSuperMethod(result)
+            mayBeAddCallToSuperMethod(initializerStatements, declaration, initFun, newContext)
         }
         else {
-            result = JsFunction(context().scope(), JsBlock(), "fake constructor for " + classDescriptor.getName().asString())
+            initFun = JsFunction(context.scope(), JsBlock(), "fake constructor for " + classDescriptor.getName().asString())
+            newContext = context.contextWithScope(initFun)
         }
 
         delegationTranslator.addInitCode(initializerStatements)
-        InitializerVisitor(initializerStatements).traverseContainer(classDeclaration, context())
+        InitializerVisitor(initializerStatements).traverseContainer(declaration, newContext)
 
-        val statements = result.getBody().getStatements()
+        val statements = initFun.getBody().getStatements()
 
         for (statement in initializerStatements) {
             if (statement is JsBlock) {
@@ -82,43 +91,44 @@ public class ClassInitializerTranslator(private val classDeclaration: JetClassOr
             }
         }
 
-        return result
+        return initFun
     }
 
-    public fun generateEnumEntryInstanceCreation(enumClassType: JetType): JsExpression {
-        val superCall = getSuperCall()
+    platformStatic
+    public fun generateEnumEntryInstanceCreation(declaration: JetEnumEntry, enumClassType: JetType, context: TranslationContext): JsExpression {
+        val superCall = getSuperCall(declaration, context)
 
         if (superCall == null) {
             val classDescriptor = getClassDescriptorForType(enumClassType)
-            val reference = context().getQualifiedReference(classDescriptor)
+            val reference = context.getQualifiedReference(classDescriptor)
             return JsNew(reference)
         }
 
-        return CallTranslator.translate(context(), superCall)
+        return CallTranslator.translate(context, superCall)
     }
 
-    private fun mayBeAddCallToSuperMethod(initializer: JsFunction) {
-        if (classDeclaration.hasModifier(JetTokens.ENUM_KEYWORD)) {
-            addCallToSuperMethod(emptyList<JsExpression>(), initializer)
+    private fun mayBeAddCallToSuperMethod(initializerStatements: MutableList<JsStatement>, declaration: JetClassOrObject, initializer: JsFunction, context: TranslationContext) {
+        if (declaration.hasModifier(JetTokens.ENUM_KEYWORD)) {
+            addCallToSuperMethod(initializerStatements, emptyList<JsExpression>(), initializer, context)
             return
         }
-        if (hasAncestorClass(bindingContext(), classDeclaration)) {
-            val superCall = getSuperCall() ?: return
+        if (hasAncestorClass(context.bindingContext(), declaration)) {
+            val superCall = getSuperCall(declaration, context) ?: return
 
-            if (classDeclaration is JetEnumEntry) {
-                val expression = CallTranslator.translate(context(), superCall, null)
+            if (declaration is JetEnumEntry) {
+                val expression = CallTranslator.translate(context, superCall, null)
                 val fixedInvocation = expression.toInvocationWith(JsLiteral.THIS)
                 initializerStatements.add(0, fixedInvocation.makeStmt())
             }
             else {
-                val arguments = CallArgumentTranslator.translate(superCall, null, context()).translateArguments
-                addCallToSuperMethod(arguments, initializer)
+                val arguments = CallArgumentTranslator.translate(superCall, null, context).translateArguments
+                addCallToSuperMethod(initializerStatements, arguments, initializer, context)
             }
         }
     }
 
-    private fun addCallToSuperMethod(arguments: List<JsExpression>, initializer: JsFunction) {
-        val ref = context().scope().declareName(Namer.CALLEE_NAME)
+    private fun addCallToSuperMethod(initializerStatements: MutableList<JsStatement>, arguments: List<JsExpression>, initializer: JsFunction, context: TranslationContext) {
+        val ref = context.scope().declareName(Namer.CALLEE_NAME)
         initializer.setName(ref)
         val call = JsInvocation(Namer.getFunctionCallRef(Namer.superMethodNameRef(ref)))
         call.getArguments().add(JsLiteral.THIS)
@@ -126,40 +136,36 @@ public class ClassInitializerTranslator(private val classDeclaration: JetClassOr
         initializerStatements.add(0, call.makeStmt())
     }
 
-    private fun getSuperCall(): ResolvedCall<FunctionDescriptor>? {
-        for (specifier in classDeclaration.getDelegationSpecifiers()) {
+    private fun getSuperCall(declaration: JetClassOrObject, context: TranslationContext): ResolvedCall<FunctionDescriptor>? {
+        for (specifier in declaration.getDelegationSpecifiers()) {
             if (specifier is JetDelegatorToSuperCall) {
-                //noinspection unchecked
-                return specifier.getResolvedCallWithAssert(bindingContext()) as ResolvedCall<FunctionDescriptor>
+                @suppress("UNCHECKED_CAST")
+                return specifier.getResolvedCallWithAssert(context.bindingContext()) as ResolvedCall<FunctionDescriptor>
             }
         }
         return null
     }
 
-    fun translatePrimaryConstructorParameters(): List<JsParameter> {
-        val parameterList = getPrimaryConstructorParameters(classDeclaration)
+    private fun translatePrimaryConstructorParameters(initializerStatements: MutableList<JsStatement>, context: TranslationContext, declaration: JetClassOrObject): List<JsParameter> {
+        val parameterList = getPrimaryConstructorParameters(declaration)
         val result = ArrayList<JsParameter>()
         for (jetParameter in parameterList) {
-            result.add(translateParameter(jetParameter))
+            result.add(translateParameter(initializerStatements, jetParameter, context))
         }
         return result
     }
 
-    private fun translateParameter(jetParameter: JetParameter): JsParameter {
-        val parameterDescriptor = getDescriptorForElement(bindingContext(), jetParameter)
-        val parameterName = context().getNameForDescriptor(parameterDescriptor)
+    private fun translateParameter(initializerStatements: MutableList<JsStatement>, jetParameter: JetParameter, context: TranslationContext): JsParameter {
+        val parameterDescriptor = getDescriptorForElement(context.bindingContext(), jetParameter)
+        val parameterName = context.getNameForDescriptor(parameterDescriptor)
         val jsParameter = JsParameter(parameterName)
-        mayBeAddInitializerStatementForProperty(jsParameter, jetParameter)
+        mayBeAddInitializerStatementForProperty(initializerStatements, jsParameter, jetParameter, context)
         return jsParameter
     }
 
-    private fun mayBeAddInitializerStatementForProperty(jsParameter: JsParameter, jetParameter: JetParameter) {
-        val propertyDescriptor = getPropertyDescriptorForConstructorParameter(bindingContext(), jetParameter) ?: return
+    private fun mayBeAddInitializerStatementForProperty(initializerStatements: MutableList<JsStatement>, jsParameter: JsParameter, jetParameter: JetParameter, context: TranslationContext) {
+        val propertyDescriptor = getPropertyDescriptorForConstructorParameter(context.bindingContext(), jetParameter) ?: return
         val initialValueForProperty = jsParameter.getName().makeRef()
-        addInitializerOrPropertyDefinition(initialValueForProperty, propertyDescriptor)
-    }
-
-    private fun addInitializerOrPropertyDefinition(initialValue: JsNameRef, propertyDescriptor: PropertyDescriptor) {
-        initializerStatements.add(InitializerUtils.generateInitializerForProperty(context(), propertyDescriptor, initialValue))
+        initializerStatements.add(InitializerUtils.generateInitializerForProperty(context, propertyDescriptor, initialValueForProperty))
     }
 }

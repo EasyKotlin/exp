@@ -106,7 +106,7 @@ public class ClassTranslator private constructor(
         invocationArguments.add(getSuperclassReferences(context))
         val delegationTranslator = DelegationTranslator(classDeclaration, context())
         if (!isTrait()) {
-            val initializer = ClassInitializerTranslator(classDeclaration, context).generateInitializeMethod(delegationTranslator)
+            val initializer = ClassInitializerTranslator.generateInitializeMethod(classDeclaration, context, delegationTranslator)
             invocationArguments.add(if (initializer.getBody().getStatements().isEmpty()) JsLiteral.NULL else initializer)
         }
 

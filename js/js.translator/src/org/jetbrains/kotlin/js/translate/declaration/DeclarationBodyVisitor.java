@@ -74,17 +74,17 @@ public class DeclarationBodyVisitor extends TranslatorVisitor<Void> {
     }
 
     @Override
-    public Void visitEnumEntry(@NotNull JetEnumEntry enumEntry, TranslationContext data) {
+    public Void visitEnumEntry(@NotNull JetEnumEntry enumEntry, TranslationContext context) {
         JsExpression jsEnumEntryCreation;
-        ClassDescriptor descriptor = getClassDescriptor(data.bindingContext(), enumEntry);
+        ClassDescriptor descriptor = getClassDescriptor(context.bindingContext(), enumEntry);
         List<JetType> supertypes = getSupertypesWithoutFakes(descriptor);
         if (enumEntry.getBody() != null || supertypes.size() > 1) {
-            jsEnumEntryCreation = ClassTranslator.generateClassCreation(enumEntry, data);
+            jsEnumEntryCreation = ClassTranslator.generateClassCreation(enumEntry, context);
         } else {
             assert supertypes.size() == 1 : "Simple Enum entry must have one supertype";
-            jsEnumEntryCreation = new ClassInitializerTranslator(enumEntry, data).generateEnumEntryInstanceCreation(supertypes.get(0));
+            jsEnumEntryCreation = ClassInitializerTranslator.generateEnumEntryInstanceCreation(enumEntry, supertypes.get(0), context);
         }
-        enumEntryList.add(new JsPropertyInitializer(data.getNameForDescriptor(descriptor).makeRef(), jsEnumEntryCreation));
+        enumEntryList.add(new JsPropertyInitializer(context.getNameForDescriptor(descriptor).makeRef(), jsEnumEntryCreation));
         return null;
     }
 
